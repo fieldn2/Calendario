@@ -84,6 +84,8 @@ button:focus-visible,.btn:focus-visible,a:focus-visible{outline:2px solid var(--
   .day{min-height:0}
   .day.is-past.collapsed .list{display:none}
 }
+.tv .controls,.tv footer{display:none!important}
+.tv body{padding-block:12px}
 footer{text-align:center;font-size:12px;color:var(--muted)}
 </style>
 
@@ -100,18 +102,15 @@ footer{text-align:center;font-size:12px;color:var(--muted)}
       <button id="today">Hoje</button>
       <button id="next" class="icon-btn" aria-label="Próxima semana">›</button>
       <button id="refresh">Atualizar</button>
-      <button id="login" class="btn primary" hidden>Entrar com Google</button>
-      <button id="logout" hidden>Sair</button>
       <button id="theme" aria-label="Alternar tema">Tema escuro</button>
       <a class="btn primary" id="newEvent" href="https://calendar.google.com/calendar/r/eventedit" target="_blank" rel="noopener">+ Nova atividade</a>
     </div>
   </header>
   <div id="banner" class="banner" hidden></div>
-  <div class="status" id="status">Entre com sua conta Google para ver a semana.</div>
+  <div class="status" id="status">Carregando…</div>
   <section class="board" id="board" aria-label="Dias da semana"></section>
 </div>
 
-<script src="https://accounts.google.com/gsi/client" async defer></script>
 <script>
 const TZ = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || "America/Sao_Paulo"; } catch { return "America/Sao_Paulo"; } })();
 const DAYS = ["Segunda","Terça","Quarta","Quinta","Sexta"];
@@ -119,7 +118,7 @@ const MONTHS = ["jan","fev","mar","abr","mai","jun","jul","ago","set","out","nov
 const $ = id => document.getElementById(id);
 
 let weekStart = currentMonday();
-let token = null, tokenClient = null, events = null, lastUpdated = null, timer = null, loadSeq = 0;
+let events = null, lastUpdated = null, loadSeq = 0;
 
 function mondayOf(d){ const x = new Date(d.getFullYear(), d.getMonth(), d.getDate()); const dow = (x.getDay()+6)%7; x.setDate(x.getDate()-dow); return x; }
 function currentMonday(){ const n = new Date(); const dow = n.getDay(); return dow===0||dow===6 ? addDays(mondayOf(n),7) : mondayOf(n); }
@@ -182,7 +181,7 @@ function renderBoard(){
       if (e.link){ a.href = e.link; a.target = "_blank"; a.rel = "noopener"; a.title = "Abrir no Google Agenda"; }
       const isNow = !e.allDay && e.start <= now && e.end > now;
       a.className = "card" + (e.allDay ? " allday" : "") + (e.declined ? " declined" : "") + (isNow ? " now" : "");
-      a.style.setProperty("--c", e.color || hashColor(e.title));
+      a.style.setProperty("--c", ruleColor(e.title) || e.color || hashColor(e.title));
       const time = e.allDay ? "Dia inteiro" : `${hm(e.start)} – ${hm(e.end)}`;
       let chips = "";
       if (isNow) chips += '<span class="chip">Agora</span>';
@@ -198,109 +197,101 @@ function renderBoard(){
 
 
 // ======= CONFIGURAÇÃO =======
-// Cole aqui o ID do cliente OAuth criado no Google Cloud Console
-const CLIENT_ID = "217557513143-nc5c7o82r9u82h3bcbml8l23auq31o8g.apps.googleusercontent.com";
-const SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
+// 1) Cole aqui o endereço do App da Web do Apps Script (termina em /exec)
+const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxrW1ZsBYbQoqzYUoQzon7sqGSZX_MjXVKDRkPfkvYUTctVSBea4xQZvkhzfdi0fmWTRw/exec";
 // ============================
 
 function showBanner(html){ const b=$("banner"); if (!html){ b.hidden=true; b.innerHTML=""; return; } b.innerHTML = html; b.hidden=false; }
-function setLoggedIn(on){ $("login").hidden = on; $("logout").hidden = !on; $("refresh").hidden = !on; }
+function emptyAll(text){ document.querySelectorAll(".list").forEach(l => l.innerHTML = '<div class="empty">' + text + '</div>'); }
 
-function initAuth(){
-  if (CLIENT_ID.startsWith("COLE_AQUI")) {
-    setLoggedIn(false);
-    showBanner("<strong>Falta configurar o ID do cliente OAuth.</strong> Abra o index.html, procure a linha <code>const CLIENT_ID</code> e cole o ID criado no Google Cloud Console (veja o LEIAME.md).");
-    emptyAll("Entre para ver"); return;
-  }
-  if (!window.google || !google.accounts) { showBanner("<strong>Não consegui carregar o login do Google.</strong> Recarregue a página ou desative bloqueadores de anúncio para este site."); return; }
-  tokenClient = google.accounts.oauth2.initTokenClient({
-    client_id: CLIENT_ID, scope: SCOPE,
-    callback: resp => {
-      if (resp.error) { showBanner("<strong>Não foi possível entrar:</strong> " + esc(resp.error)); return; }
-      token = resp.access_token;
-      try { sessionStorage.setItem("quadro-token", JSON.stringify({ t: token, exp: Date.now() + (resp.expires_in - 60) * 1000 })); } catch {}
-      setLoggedIn(true); showBanner(null); load();
-    }
-  });
-  try {
-    const saved = JSON.parse(sessionStorage.getItem("quadro-token") || "null");
-    if (saved && saved.exp > Date.now()) { token = saved.t; setLoggedIn(true); load(); return; }
-  } catch {}
-  setLoggedIn(false); emptyAll("Entre para ver");
-}
-
-function emptyAll(text){ document.querySelectorAll(".list").forEach(l => l.innerHTML = '<div class="empty">' + text + '</div>'); $("status").textContent = ""; }
-
-// Cores dos eventos como aparecem no Google Agenda (colorId 1–11)
+// Cores de evento do Google Agenda (colorId 1–11)
 const EVENT_COLORS = {"1":"#7986cb","2":"#33b679","3":"#8e24aa","4":"#e67c73","5":"#f6bf26","6":"#f4511e","7":"#039be5","8":"#616161","9":"#3f51b5","10":"#0b8043","11":"#d50000"};
 
-async function api(path){
-  const r = await fetch("https://www.googleapis.com/calendar/v3/" + path, { headers: { Authorization: "Bearer " + token } });
-  if (r.status === 401) { const e = new Error("401"); e.auth = true; throw e; }
-  if (!r.ok) throw new Error("Erro " + r.status);
-  return r.json();
+// Busca via JSONP (tag <script>), que não sofre bloqueio de CORS
+function jsonp(url){
+  return new Promise((resolve, reject) => {
+    const cb = "__quadro_cb_" + Date.now() + "_" + Math.floor(Math.random()*1e6);
+    const el = document.createElement("script");
+    const done = () => { delete window[cb]; el.remove(); clearTimeout(t); };
+    const t = setTimeout(() => { done(); reject(new Error("tempo esgotado")); }, 20000);
+    window[cb] = data => { done(); resolve(data); };
+    el.onerror = () => { done(); reject(new Error("não foi possível acessar o Apps Script (confira se a implantação está como 'Qualquer pessoa')")); };
+    el.src = url + (url.includes("?") ? "&" : "?") + "callback=" + cb;
+    document.head.appendChild(el);
+  });
 }
 
 async function load(){
-  if (!token) return;
+  if (SCRIPT_URL.startsWith("COLE_AQUI")) {
+    showBanner("<strong>Falta configurar o endereço do Apps Script.</strong> Cole a URL em <code>SCRIPT_URL</code> no index.html (veja o LEIAME.md).");
+    emptyAll("Sem dados"); return;
+  }
   const seq = ++loadSeq;
-  $("status").textContent = "Carregando…";
-  const params = new URLSearchParams({
-    timeMin: weekStart.toISOString(), timeMax: addDays(weekStart,5).toISOString(),
-    singleEvents: "true", orderBy: "startTime", maxResults: "250", timeZone: TZ
-  });
+  const params = new URLSearchParams({ start: weekStart.toISOString(), end: addDays(weekStart,5).toISOString() });
   try {
-    // Todas as agendas marcadas como visíveis no Google Agenda
-    const list = await api("users/me/calendarList?minAccessRole=reader");
-    const cals = (list.items || []).filter(c => c.selected || c.primary);
-    const results = await Promise.all(cals.map(c =>
-      api("calendars/" + encodeURIComponent(c.id) + "/events?" + params)
-        .then(d => (d.items || []).map(ev => {
-          const e = normalize(ev);
-          e.color = (ev.colorId && EVENT_COLORS[ev.colorId]) || c.backgroundColor || null;
-          e.calendar = c.summaryOverride || c.summary || "";
-          e.primaryCal = !!c.primary;
-          return e;
-        }))
-        .catch(err => { if (err.auth) throw err; return []; })
-    ));
+    const data = await jsonp(SCRIPT_URL + "?" + params);
     if (seq !== loadSeq) return;
-    events = results.flat();
+    if (data.error) { showBanner("<strong>O Apps Script recusou o pedido:</strong> " + esc(data.error)); return; }
+    events = (data.events || []).map(ev => ({
+      id: ev.id, title: ev.title || "(sem título)", allDay: ev.allDay,
+      start: ev.allDay ? parseDateOnly(ev.start) : new Date(ev.start),
+      end: ev.allDay ? parseDateOnly(ev.end) : new Date(ev.end),
+      location: ev.location || "", link: "", meet: "", declined: false, status: "confirmed",
+      color: (ev.colorId && EVENT_COLORS[ev.colorId]) || ev.calendarColor || null,
+      calendar: ev.calendar || "", primaryCal: !!ev.primary
+    }));
     lastUpdated = new Date(); showBanner(null);
-    $("status").textContent = "Atualizado às " + hm(lastUpdated) + (cals.length > 1 ? " · " + cals.length + " agendas" : "");
+    $("status").textContent = "Atualizado às " + hm(lastUpdated);
     renderBoard();
   } catch (e) {
     if (seq !== loadSeq) return;
-    if (e.auth) { token = null; try { sessionStorage.removeItem("quadro-token"); } catch {} ; setLoggedIn(false); showBanner("<strong>Sua sessão expirou.</strong> Clique em Entrar com Google."); emptyAll("Entre para ver"); return; }
-    showBanner("<strong>Não foi possível carregar os eventos.</strong> " + esc(e.message) + ". Clique em Atualizar para tentar de novo.");
+    // Mantém o que já está na tela e tenta de novo no próximo ciclo
+    showBanner("<strong>Sem conexão com a agenda agora</strong> (" + esc(e.message) + "). Tentando de novo em 1 minuto." + (lastUpdated ? " Mostrando dados de " + hm(lastUpdated) + "." : ""));
+    if (!events) emptyAll("Sem dados");
   }
 }
 
-function changeWeek(ws){ weekStart = ws; events = null; renderHeader(); renderBoard(); if (token) load(); else emptyAll("Entre para ver"); }
+function changeWeek(ws){ weekStart = ws; events = null; renderHeader(); renderBoard(); load(); }
 
 $("prev").onclick = () => changeWeek(addDays(weekStart,-7));
 $("next").onclick = () => changeWeek(addDays(weekStart,7));
 $("today").onclick = () => changeWeek(currentMonday());
 $("refresh").onclick = load;
-$("login").onclick = () => {
-  if (CLIENT_ID.startsWith("COLE_AQUI")) { showBanner("<strong>O login ainda não funciona porque falta o ID do cliente.</strong> Cole o seu CLIENT_ID no index.html e suba o arquivo de novo."); return; }
-  if (!tokenClient) { showBanner("<strong>O login do Google ainda não carregou.</strong> Recarregue a página e tente de novo."); return; }
-  tokenClient.requestAccessToken({ prompt: "" });
-};
-$("logout").onclick = () => {
-  if (token && window.google) google.accounts.oauth2.revoke(token, () => {});
-  token = null; events = null; try { sessionStorage.removeItem("quadro-token"); } catch {}
-  setLoggedIn(false); renderBoard(); emptyAll("Entre para ver");
-};
+
+// Modo TV: abra o site com ?tv no final do endereço para esconder os botões
+if (new URLSearchParams(location.search).has("tv")) document.documentElement.classList.add("tv");
+
+// Mantém a tela da TV acesa quando o navegador permite
+async function keepAwake(){ try { if ("wakeLock" in navigator && document.visibilityState === "visible") await navigator.wakeLock.request("screen"); } catch {} }
+document.addEventListener("visibilitychange", keepAwake); keepAwake();
+
+// ======= CORES POR DEMANDA =======
+// Cor por palavra no título do evento. Edite esta lista para mudar as cores:
+const DEFAULT_RULES = [
+  { word: "Layout",   color: "#d50000" },  // vermelho
+  { word: "Recursal", color: "#f6bf26" },  // amarelo
+  { word: "Criminal", color: "#8e24aa" },  // roxo
+  { word: "Cível",    color: "#33b679" },  // verde
+];
+const rules = DEFAULT_RULES;
+function norm(t){ return (t || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, ""); }
+function ruleColor(title){ const t = norm(title); const r = rules.find(r => r.word && r.word.trim() && t.includes(norm(r.word.trim()))); return r ? r.color : null; }
 
 function currentTheme(){ const t = document.documentElement.dataset.theme; if (t) return t; return matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"; }
 function applyTheme(t){ document.documentElement.dataset.theme = t; $("theme").textContent = t === "dark" ? "☀ Tema claro" : "☾ Tema escuro"; }
 try { const saved = localStorage.getItem("quadro-tema"); applyTheme(saved === "light" || saved === "dark" ? saved : currentTheme()); } catch { applyTheme(currentTheme()); }
 $("theme").onclick = () => { const t = currentTheme() === "dark" ? "light" : "dark"; applyTheme(t); try { localStorage.setItem("quadro-tema", t); } catch {} };
 
-setInterval(() => { if (token && document.visibilityState === "visible") load(); }, 60000);
-renderHeader(); renderBoard();
-window.addEventListener("load", initAuth);
+// Atualiza a cada minuto; vira para a semana atual sozinho (ex.: segunda de manhã)
+let shownMonday = currentMonday().getTime();
+setInterval(() => {
+  const m = currentMonday().getTime();
+  if (m !== shownMonday) { shownMonday = m; changeWeek(currentMonday()); return; }
+  load();
+}, 60000);
+// Recarrega a página uma vez por dia (de madrugada) para pegar atualizações do site
+setInterval(() => { const n = new Date(); if (n.getHours() === 4 && n.getMinutes() === 0) location.reload(); }, 60000);
+renderHeader(); renderBoard(); load();
 </script>
 </body>
 </html>
